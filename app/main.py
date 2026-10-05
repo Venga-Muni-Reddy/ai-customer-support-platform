@@ -96,12 +96,12 @@ def chat(slug, b: Chat, req: Request):
               [{"title": c["title"], "text": c["text"][:400]} for c in s["chunks"]]
     r = db.q("""INSERT INTO questions (workspace_id,session_id,question,answer,confidence,status,escalation_reason,sources,verdict,trace)
                 VALUES (%s,%s,%s,%s,%s,%s,%s,%s::jsonb,%s::jsonb,%s::jsonb) RETURNING *""",
-             (w["id"], b.session_id, b.question.strip(), s.get("answer") or None, s["confidence"], status, s.get("reason") or None,
+             (w["id"], b.session_id, b.question.strip(), None if (s.get("answer") or "").upper().startswith("INSUFFICIENT") else (s.get("answer") or None), s["confidence"], status, s.get("reason") or None,
               json.dumps(sources), json.dumps(s.get("verdict")), json.dumps(s["trace"])), one=True)
     out = public_q(r)
     if status == "escalated":
         out["answer"] = None  # never show an unverified draft to the customer
-        out["draft_hidden"] = bool(s.get("answer"))
+        out["draft_hidden"] = bool(s.get("answer")) and not s["answer"].upper().startswith("INSUFFICIENT")
     return out
 
 @app.get("/api/w/{slug}/session/{sid}")
