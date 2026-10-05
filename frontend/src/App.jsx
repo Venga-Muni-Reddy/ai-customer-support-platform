@@ -1,10 +1,7 @@
 import React, { useEffect, useRef, useState } from 'react'
 
-const api = async (path, opts = {}, key) => {
-  const r = await fetch('/api' + path, {
-    ...opts,
-    headers: { 'Content-Type': 'application/json', ...(key ? { 'X-Admin-Key': key } : {}) },
-  })
+const api = async (path, opts = {}) => {
+  const r = await fetch('/api' + path, { ...opts, credentials: 'same-origin', headers: { 'Content-Type': 'application/json' } })
   const j = await r.json().catch(() => ({}))
   if (!r.ok) throw new Error(typeof j.detail === 'string' ? j.detail : 'Request failed (' + r.status + ')')
   return j
@@ -16,31 +13,91 @@ const useHash = () => {
 }
 const sid = () => { let s = localStorage.getItem('sp_sid'); if (!s) { s = 's' + Math.random().toString(36).slice(2, 12); localStorage.setItem('sp_sid', s) } return s }
 
+const AuthCtx = React.createContext(null)
+
 export default function App() {
   const h = useHash()
+  const [user, setUser] = useState(undefined)
+  useEffect(() => { api('/auth/me').then(r => setUser(r.email)).catch(() => setUser(null)) }, [])
+  const logout = async () => { await api('/auth/logout', { method: 'POST' }).catch(() => {}); setUser(null); location.hash = '#/' }
   const m = h.match(/^#\/w\/([^/]+)(\/admin)?/)
+  let page
+  if (m) page = m[2] ? <Admin slug={m[1]} /> : <Chat slug={m[1]} />
+  else if (h === '#/login' || h === '#/signup') page = <AuthForm mode={h === '#/signup' ? 'signup' : 'login'} />
+  else if (h === '#/workspaces') page = <Workspaces />
+  else page = <Home />
   return (
-    <div>
+    <AuthCtx.Provider value={{ user, setUser }}>
       <header className="top"><a href="#/" className="logo">SupportPilot</a>
-        <nav><a href="#/w/demo">Demo chat</a><a href="#/w/demo/admin">Demo dashboard</a></nav></header>
-      {m ? (m[2] ? <Admin slug={m[1]} /> : <Chat slug={m[1]} />) : <Home />}
-    </div>
+        <nav><a href="#/w/demo">Demo chat</a><a href="#/w/demo/admin">Demo dashboard</a>
+          {user === undefined ? null : user
+            ? <><a href="#/workspaces">My workspaces</a><span className="muted who">{user}</span><button className="link" onClick={logout}>Log out</button></>
+            : <><a href="#/login">Log in</a><a className="btn sm" href="#/signup">Sign up</a></>}
+        </nav></header>
+      {page}
+    </AuthCtx.Provider>
   )
 }
 
-function Home() {
-  const [name, setName] = useState(''); const [err, setErr] = useState(''); const [created, setCreated] = useState(null); const [busy, setBusy] = useState(false)
-  const create = async e => {
+function AuthForm({ mode }) {
+  const { user, setUser } = React.useContext(AuthCtx)
+  const [email, setEmail] = useState(''); const [pw, setPw] = useState(''); const [err, setErr] = useState(''); const [busy, setBusy] = useState(false)
+  useEffect(() => { if (user) location.hash = '#/workspaces' }, [user])
+  const go = async e => {
     e.preventDefault(); setBusy(true); setErr('')
-    try { const r = await api('/workspaces', { method: 'POST', body: JSON.stringify({ name }) }); localStorage.setItem('key_' + r.slug, r.admin_key); setCreated(r) }
+    try { const r = await api('/auth/' + mode, { method: 'POST', body: JSON.stringify({ email, password: pw }) }); setUser(r.email); location.hash = '#/workspaces' }
     catch (x) { setErr(x.message) } finally { setBusy(false) }
   }
+  const su = mode === 'signup'
+  return (
+    <main className="wrap narrow"><h2>{su ? 'Create your account' : 'Log in'}</h2>
+      <form onSubmit={go} className="card">
+        <input type="email" value={email} onChange={e => setEmail(e.target.value)} placeholder="Email" required autoComplete="email" />
+        <input type="password" value={pw} onChange={e => setPw(e.target.value)} placeholder={su ? 'Password (8 to 72 characters)' : 'Password'} required minLength={su ? 8 : 1} maxLength={72} autoComplete={su ? 'new-password' : 'current-password'} />
+        <button className="btn" disabled={busy}>{busy ? 'Please wait...' : su ? 'Sign up' : 'Log in'}</button>
+        {err && <p className="err">{err}</p>}
+      </form>
+      <p className="muted">{su ? <>Already have an account? <a href="#/login">Log in</a></> : <>No account yet? <a href="#/signup">Sign up</a></>}. Passwords are hashed with bcrypt. You only need an account to create your own workspace; the demo needs none.</p>
+    </main>
+  )
+}
+
+function Workspaces() {
+  const { user } = React.useContext(AuthCtx)
+  const [list, setList] = useState(null); const [name, setName] = useState(''); const [err, setErr] = useState(''); const [busy, setBusy] = useState(false)
+  const load = () => api('/my/workspaces').then(setList).catch(e => setErr(e.message))
+  useEffect(() => { if (user) load() }, [user])
+  if (user === undefined) return <main className="wrap"><p>Loading...</p></main>
+  if (!user) return <main className="wrap narrow"><h2>My workspaces</h2><p>Please <a href="#/login">log in</a> or <a href="#/signup">sign up</a> to create and manage your own workspaces.</p></main>
+  const create = async e => {
+    e.preventDefault(); setBusy(true); setErr('')
+    try { const r = await api('/workspaces', { method: 'POST', body: JSON.stringify({ name }) }); location.hash = '#/w/' + r.slug + '/admin' }
+    catch (x) { setErr(x.message) } finally { setBusy(false) }
+  }
+  const del = async w => { if (!confirm('Delete workspace "' + w.name + '" and all its data?')) return; try { await api('/w/' + w.slug, { method: 'DELETE' }); load() } catch (x) { setErr(x.message) } }
+  return (
+    <main className="wrap narrow"><h2>My workspaces</h2>
+      <p className="muted">Signed in as {user}. Only you can open the dashboard of your workspaces.</p>
+      {list && list.length === 0 && <p className="muted">No workspaces yet. Create your first one below.</p>}
+      {list && list.map(w => <div className="card row2" key={w.slug}><span><b>{w.name}</b></span>
+        <span><a className="btn sm" href={'#/w/' + w.slug + '/admin'}>Dashboard</a> <a className="btn ghost sm" href={'#/w/' + w.slug}>Customer chat</a> <button className="link" onClick={() => del(w)}>Delete</button></span></div>)}
+      <form onSubmit={create} className="row"><input value={name} onChange={e => setName(e.target.value)} placeholder="Your business name" required minLength={2} maxLength={60} /><button className="btn" disabled={busy}>{busy ? 'Creating...' : 'Create workspace'}</button></form>
+      {err && <p className="err">{err}</p>}
+      <p className="muted">Free demo limits: 3 workspaces per account, 12 documents per workspace.</p>
+    </main>
+  )
+}
+
+
+function Home() {
+  const { user } = React.useContext(AuthCtx)
   return (
     <main className="wrap">
       <section className="hero">
         <h1>AI customer support that knows when <em>not</em> to answer</h1>
         <p>Upload your help docs. A team of LangGraph agents answers customer questions from them, a second agent fact-checks every answer against the sources, and anything it is not sure about goes to a human queue instead of reaching the customer.</p>
-        <div className="cta"><a className="btn" href="#/w/demo">Try the live demo chat</a><a className="btn ghost" href="#/w/demo/admin">Open the demo dashboard</a></div>
+        <div className="cta"><a className="btn" href="#/w/demo">Try the live demo chat</a><a className="btn ghost" href="#/w/demo/admin">View the demo dashboard</a></div>
+        <p className="muted">No signup needed for the demo.</p>
       </section>
       <section className="grid3">
         <div className="card"><h3>1. Retrieve</h3><p>PostgreSQL full-text search finds the relevant passages in your documents.</p></div>
@@ -49,16 +106,8 @@ function Home() {
       </section>
       <section className="card">
         <h2>Create your own workspace</h2>
-        {created ? (
-          <div>
-            <p>Workspace <b>{created.name}</b> created. Your admin key (shown once, saved in this browser):</p>
-            <code className="key">{created.admin_key}</code>
-            <div className="cta"><a className="btn" href={'#/w/' + created.slug + '/admin'}>Open dashboard and add docs</a><a className="btn ghost" href={'#/w/' + created.slug}>Customer chat page</a></div>
-          </div>
-        ) : (
-          <form onSubmit={create} className="row"><input value={name} onChange={e => setName(e.target.value)} placeholder="Your business name" required minLength={2} maxLength={60} /><button className="btn" disabled={busy}>{busy ? 'Creating...' : 'Create workspace'}</button></form>
-        )}
-        {err && <p className="err">{err}</p>}
+        <p>Sign up with email and password, then create a workspace, add your docs and resolve escalations. Each workspace is private to your account.</p>
+        <div className="cta">{user ? <a className="btn" href="#/workspaces">Go to my workspaces</a> : <><a className="btn" href="#/signup">Sign up</a><a className="btn ghost" href="#/login">Log in</a></>}</div>
         <p className="muted">Free demo limits: 12 documents per workspace, rate-limited chat. Retrieval is keyword-based full-text search (no vector embeddings).</p>
       </section>
     </main>
@@ -108,7 +157,7 @@ function Chat({ slug }) {
       </div>
       {err && <p className="err">{err}</p>}
       <form onSubmit={send} className="row"><input value={text} onChange={e => setText(e.target.value)} placeholder="Type your question" maxLength={500} /><button className="btn" disabled={busy}>Send</button></form>
-      <p className="muted">First reply may take up to a minute if the free server was asleep. <a href={`#/w/${slug}/admin`}>Open dashboard</a></p>
+      <p className="muted">First reply may take up to a minute if the free server was asleep. {info?.is_demo ? <a href={`#/w/${slug}/admin`}>View demo dashboard</a> : info?.can_manage && <a href={`#/w/${slug}/admin`}>Open dashboard</a>}</p>
     </main>
   )
 }
@@ -131,38 +180,40 @@ function Details({ m }) {
 }
 
 function Admin({ slug }) {
-  const [key, setKey] = useState(localStorage.getItem('key_' + slug) || (slug === 'demo' ? 'demo-admin' : ''))
-  const [authed, setAuthed] = useState(false); const [tab, setTab] = useState('queue'); const [err, setErr] = useState('')
+  const { user } = React.useContext(AuthCtx)
+  const [info, setInfo] = useState(null); const [tab, setTab] = useState('queue'); const [err, setErr] = useState('')
   const [stats, setStats] = useState(null)
-  const refresh = async () => { try { setStats(await api(`/w/${slug}/admin/stats`, {}, key)); setAuthed(true); setErr(''); localStorage.setItem('key_' + slug, key) } catch (x) { setErr(x.message); setAuthed(false) } }
-  useEffect(() => { if (key) refresh() }, [])
-  if (!authed) return (
+  const refresh = async () => { try { setStats(await api(`/w/${slug}/admin/stats`)); setErr('') } catch (x) { setErr(x.message); setStats(null) } }
+  useEffect(() => { api('/w/' + slug).then(setInfo).catch(e => setErr(e.message)) }, [slug])
+  useEffect(() => { if (user !== undefined) refresh() }, [slug, user])
+  if (user === undefined) return <main className="wrap"><p>Loading...</p></main>
+  if (!stats) return (
     <main className="wrap narrow"><h2>Dashboard - {slug}</h2>
-      {slug === 'demo' && <p className="muted">Demo workspace admin key: <code>demo-admin</code> (public, sample data).</p>}
-      <form className="row" onSubmit={e => { e.preventDefault(); refresh() }}><input value={key} onChange={e => setKey(e.target.value)} placeholder="Admin key" /><button className="btn">Open</button></form>
-      {err && <p className="err">{err}</p>}</main>)
+      {!user && slug !== 'demo' ? <p>Please <a href="#/login">log in</a> to open this dashboard. Only the workspace owner can see it.</p> : err && <p className="err">{err}</p>}</main>)
+  const ro = !!info?.is_demo
   return (
     <main className="wrap">
-      <h2>Dashboard - {slug}</h2>
+      <h2>Dashboard - {info ? info.name : slug}</h2>
+      {ro && <p className="muted banner">Read-only demo dashboard with sample data. <a href="#/signup">Sign up</a> to create your own workspace, add documents and reply to escalations.</p>}
       <div className="stats">
         <Stat l="Questions" v={stats.total} /><Stat l="Auto-resolved" v={stats.auto} /><Stat l="Open escalations" v={stats.open_escalations} /><Stat l="Human-resolved" v={stats.human} />
         <Stat l="Auto rate" v={stats.auto_rate == null ? '-' : stats.auto_rate + '%'} /><Stat l="Avg confidence" v={stats.avg_conf ?? '-'} /><Stat l="Documents" v={stats.docs} />
       </div>
       <div className="tabs">{['queue', 'history', 'knowledge'].map(t => <button key={t} className={tab === t ? 'on' : ''} onClick={() => setTab(t)}>{t === 'queue' ? 'Escalation queue' : t === 'history' ? 'All conversations' : 'Knowledge base'}</button>)}</div>
-      {tab === 'queue' && <Queue slug={slug} k={key} status="escalated" onChange={refresh} reply />}
-      {tab === 'history' && <Queue slug={slug} k={key} status="all" onChange={refresh} />}
-      {tab === 'knowledge' && <Docs slug={slug} k={key} onChange={refresh} />}
+      {tab === 'queue' && <Queue slug={slug} status="escalated" onChange={refresh} reply={!ro} />}
+      {tab === 'history' && <Queue slug={slug} status="all" onChange={refresh} />}
+      {tab === 'knowledge' && <Docs slug={slug} onChange={refresh} ro={ro} />}
     </main>
   )
 }
 const Stat = ({ l, v }) => <div className="stat"><div className="n">{v}</div><div>{l}</div></div>
 
-function Queue({ slug, k, status, onChange, reply }) {
+function Queue({ slug, status, onChange, reply }) {
   const [rows, setRows] = useState(null); const [txt, setTxt] = useState({}); const [kb, setKb] = useState({}); const [err, setErr] = useState('')
-  const load = () => api(`/w/${slug}/admin/queue?status=${status}`, {}, k).then(setRows).catch(e => setErr(e.message))
+  const load = () => api(`/w/${slug}/admin/queue?status=${status}`).then(setRows).catch(e => setErr(e.message))
   useEffect(() => { load() }, [status])
   const send = async id => {
-    try { await api(`/w/${slug}/admin/queue/${id}/reply`, { method: 'POST', body: JSON.stringify({ reply: txt[id] || '', add_to_kb: !!kb[id] }) }, k); await load(); onChange() }
+    try { await api(`/w/${slug}/admin/queue/${id}/reply`, { method: 'POST', body: JSON.stringify({ reply: txt[id] || '', add_to_kb: !!kb[id] }) }); await load(); onChange() }
     catch (x) { setErr(x.message) }
   }
   if (!rows) return <p>Loading...</p>
@@ -188,20 +239,20 @@ function Queue({ slug, k, status, onChange, reply }) {
   )
 }
 
-function Docs({ slug, k, onChange }) {
+function Docs({ slug, onChange, ro }) {
   const [docs, setDocs] = useState([]); const [t, setT] = useState(''); const [x, setX] = useState(''); const [err, setErr] = useState('')
-  const load = () => api(`/w/${slug}/admin/docs`, {}, k).then(setDocs).catch(e => setErr(e.message))
+  const load = () => api(`/w/${slug}/admin/docs`).then(setDocs).catch(e => setErr(e.message))
   useEffect(() => { load() }, [])
-  const add = async e => { e.preventDefault(); setErr(''); try { await api(`/w/${slug}/admin/docs`, { method: 'POST', body: JSON.stringify({ title: t, text: x }) }, k); setT(''); setX(''); await load(); onChange() } catch (z) { setErr(z.message) } }
-  const del = async id => { setErr(''); try { await api(`/w/${slug}/admin/docs/${id}`, { method: 'DELETE' }, k); await load(); onChange() } catch (z) { setErr(z.message) } }
+  const add = async e => { e.preventDefault(); setErr(''); try { await api(`/w/${slug}/admin/docs`, { method: 'POST', body: JSON.stringify({ title: t, text: x }) }); setT(''); setX(''); await load(); onChange() } catch (z) { setErr(z.message) } }
+  const del = async id => { setErr(''); try { await api(`/w/${slug}/admin/docs/${id}`, { method: 'DELETE' }); await load(); onChange() } catch (z) { setErr(z.message) } }
   return (
     <div>
-      <div className="card"><h3>Add a document</h3>
+      {!ro && <div className="card"><h3>Add a document</h3>
         <form onSubmit={add}><input value={t} onChange={e => setT(e.target.value)} placeholder="Title (e.g. Refund policy)" required minLength={2} />
           <textarea rows={6} value={x} onChange={e => setX(e.target.value)} placeholder="Paste FAQ or help-center text (max 20,000 characters). Separate topics with blank lines." required minLength={20} />
-          <button className="btn">Add to knowledge base</button></form></div>
+          <button className="btn">Add to knowledge base</button></form></div>}
       {err && <p className="err">{err}</p>}
-      {docs.map(d => <div className="card row2" key={d.id}><span><b>{d.title}</b> <span className="muted">{d.chunks} chunk(s) - {d.source}</span></span><button className="link" onClick={() => del(d.id)}>Delete</button></div>)}
+      {docs.map(d => <div className="card row2" key={d.id}><span><b>{d.title}</b> <span className="muted">{d.chunks} chunk(s) - {d.source}</span></span>{!ro && <button className="link" onClick={() => del(d.id)}>Delete</button>}</div>)}
     </div>
   )
 }
